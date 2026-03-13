@@ -1,0 +1,334 @@
+#include <SFML/Graphics.hpp>
+#include <SFML/Audio.hpp>
+#include <vector>
+#include <optional>
+#include <random>
+#include <algorithm>
+#include <cmath>
+
+constexpr unsigned WINDOW_WIDTH  = 800;
+constexpr unsigned WINDOW_HEIGHT = 600;
+
+constexpr float GRAVITY        = 1200.f;
+constexpr float JUMP_FORCE     = -420.f;
+constexpr float PIPE_SPEED     = 260.f;
+constexpr float PIPE_WIDTH     = 80.f;
+constexpr float PIPE_GAP       = 185.f;
+constexpr float PIPE_INTERVAL  = 1.8f;
+constexpr float GROUND_HEIGHT  = 80.f;
+
+enum class GameState { Start, Playing, GameOver };
+
+float randomGapY()
+{
+    static std::mt19937 rng(std::random_device{}());
+    std::uniform_real_distribution<float> dist(160.f, WINDOW_HEIGHT-220.f);
+    return dist(rng);
+}
+
+////////////////////////////////////////////////////////////
+/// CLAP DETECTOR
+////////////////////////////////////////////////////////////
+class ClapDetector : public sf::SoundRecorder
+{
+public:
+    bool clapDetected=false;
+
+private:
+    bool onProcessSamples(const std::int16_t* samples,std::size_t count) override
+    {
+        long long sum=0;
+        for(size_t i=0;i<count;i++) sum+=std::abs(samples[i]);
+        float avg=float(sum)/count;
+
+        if(avg>6000) clapDetected=true; // adjust sensitivity here
+        return true;
+    }
+};
+
+////////////////////////////////////////////////////////////
+/// BIRD
+////////////////////////////////////////////////////////////
+class Bird
+{
+public:
+    Bird()
+    {
+        body.setRadius(20.f);
+        body.setFillColor(sf::Color(255,230,40));
+        body.setOutlineThickness(2);
+        body.setOutlineColor(sf::Color::Black);
+        body.setOrigin({20,20});
+
+        wing.setSize({24,10});
+        wing.setFillColor(sf::Color(255,170,0));
+        wing.setOrigin({12,5});
+
+        eye.setRadius(3);
+        eye.setFillColor(sf::Color::Black);
+        eye.setOrigin({3,3});
+
+        beak.setPointCount(3);
+        beak.setPoint(0,{0,0});
+        beak.setPoint(1,{12,5});
+        beak.setPoint(2,{0,10});
+        beak.setFillColor(sf::Color(255,120,0));
+
+        reset();
+    }
+
+    void reset()
+    {
+        position={200,WINDOW_HEIGHT/2.f};
+        velocity=0;
+        updateParts();
+    }
+
+    void jump(){ velocity=JUMP_FORCE; }
+
+    void update(float dt)
+    {
+        velocity+=GRAVITY*dt;
+        position.y+=velocity*dt;
+
+        float angle=std::clamp(velocity*0.1f,-30.f,90.f);
+        body.setRotation(sf::degrees(angle));
+        wing.setRotation(sf::degrees(angle));
+        eye.setRotation(sf::degrees(angle));
+        beak.setRotation(sf::degrees(angle));
+
+        updateParts();
+    }
+
+    float getBottom()const{return position.y+20;}
+    float getTop()const{return position.y-20;}
+    sf::FloatRect bounds()const{return body.getGlobalBounds();}
+
+    void draw(sf::RenderWindow& w)
+    {
+        w.draw(body);
+        w.draw(wing);
+        w.draw(eye);
+        w.draw(beak);
+    }
+
+private:
+    void updateParts()
+    {
+        body.setPosition(position);
+        wing.setPosition({position.x-6,position.y+6});
+        eye.setPosition({position.x+9,position.y-6});
+        beak.setPosition({position.x+18,position.y-3});
+    }
+
+    sf::CircleShape body,eye;
+    sf::RectangleShape wing;
+    sf::ConvexShape beak;
+
+    sf::Vector2f position;
+    float velocity=0;
+};
+
+////////////////////////////////////////////////////////////
+/// PIPE
+////////////////////////////////////////////////////////////
+class Pipe
+{
+public:
+    Pipe(float x)
+    {
+        float gapY=randomGapY();
+
+        float topH=gapY-PIPE_GAP/2.f;
+        float bottomH=WINDOW_HEIGHT-GROUND_HEIGHT-(gapY+PIPE_GAP/2.f);
+
+        top.setSize({PIPE_WIDTH,topH});
+        bottom.setSize({PIPE_WIDTH,bottomH});
+
+        top.setFillColor(sf::Color(40,160,40));
+        bottom.setFillColor(sf::Color(40,160,40));
+
+        top.setOutlineThickness(2);
+        bottom.setOutlineThickness(2);
+        top.setOutlineColor(sf::Color::Black);
+        bottom.setOutlineColor(sf::Color::Black);
+
+        top.setPosition({x,0});
+        bottom.setPosition({x,gapY+PIPE_GAP/2.f});
+
+        capTop.setSize({PIPE_WIDTH+10,18});
+        capBottom.setSize({PIPE_WIDTH+10,18});
+
+        capTop.setFillColor(sf::Color(20,120,20));
+        capBottom.setFillColor(sf::Color(20,120,20));
+
+        capTop.setOutlineThickness(2);
+        capBottom.setOutlineThickness(2);
+        capTop.setOutlineColor(sf::Color::Black);
+        capBottom.setOutlineColor(sf::Color::Black);
+
+        capTop.setPosition({x-5,topH-18});
+        capBottom.setPosition({x-5,gapY+PIPE_GAP/2.f});
+    }
+
+    void update(float dt)
+    {
+        float dx=-PIPE_SPEED*dt;
+        top.move({dx,0});
+        bottom.move({dx,0});
+        capTop.move({dx,0});
+        capBottom.move({dx,0});
+    }
+
+    bool isOffscreen()const
+    { return top.getPosition().x+PIPE_WIDTH<0; }
+
+    bool checkCollision(const Bird& bird)
+    {
+        return bird.bounds().findIntersection(top.getGlobalBounds()) ||
+               bird.bounds().findIntersection(bottom.getGlobalBounds()) ||
+               bird.bounds().findIntersection(capTop.getGlobalBounds()) ||
+               bird.bounds().findIntersection(capBottom.getGlobalBounds());
+    }
+
+    bool passed(float birdX)
+    {
+        if(!scored && top.getPosition().x+PIPE_WIDTH<birdX)
+        {scored=true;return true;}
+        return false;
+    }
+
+    void draw(sf::RenderWindow& w)
+    {
+        w.draw(top);
+        w.draw(bottom);
+        w.draw(capTop);
+        w.draw(capBottom);
+    }
+
+private:
+    sf::RectangleShape top,bottom,capTop,capBottom;
+    bool scored=false;
+};
+
+///////////////////////////////////////////////////////////
+/// MAIN
+///////////////////////////////////////////////////////////
+int main()
+{
+    if(!sf::SoundRecorder::isAvailable()) return -1;
+
+    ClapDetector mic;
+    mic.start();
+
+    sf::RenderWindow window(
+        sf::VideoMode({WINDOW_WIDTH,WINDOW_HEIGHT}),
+        "CLAPPY BIRD");
+    window.setFramerateLimit(60);
+    window.setKeyRepeatEnabled(false); // ignore key repeat
+
+    sf::Clock clock;
+
+    Bird bird;
+    std::vector<Pipe> pipes;
+
+    sf::RectangleShape ground({WINDOW_WIDTH,GROUND_HEIGHT});
+    ground.setFillColor(sf::Color(110,60,20));
+    ground.setPosition({0,WINDOW_HEIGHT-GROUND_HEIGHT});
+
+    sf::Font font("arial.ttf");
+
+    sf::Text scoreText(font);
+    scoreText.setCharacterSize(50);
+    scoreText.setStyle(sf::Text::Bold);
+    scoreText.setOutlineThickness(3);
+    scoreText.setOutlineColor(sf::Color::Black);
+    scoreText.setPosition({WINDOW_WIDTH/2.f-20,20});
+
+    sf::Text infoText(font);
+    infoText.setCharacterSize(34);
+    infoText.setOutlineThickness(2);
+    infoText.setOutlineColor(sf::Color::Black);
+
+    GameState state=GameState::Start;
+    float spawnTimer=0;
+    float clapCooldown=0;
+    int score=0;
+
+    while(window.isOpen())
+    {
+        float dt=clock.restart().asSeconds();
+        clapCooldown-=dt;
+
+        // ONLY handle window close event (no keyboard input used)
+        while(const std::optional event=window.pollEvent())
+            if(event->is<sf::Event::Closed>())
+                window.close();
+
+        // clap input (ONLY control)
+        if(mic.clapDetected && clapCooldown<=0)
+        {
+            mic.clapDetected=false;
+            clapCooldown=0.25f;
+
+            if(state==GameState::Start) state=GameState::Playing;
+            else if(state==GameState::Playing) bird.jump();
+            else
+            {
+                pipes.clear();
+                bird.reset();
+                score=0;
+                spawnTimer=0;
+                state=GameState::Start;
+            }
+        }
+
+        if(state==GameState::Playing)
+        {
+            bird.update(dt);
+
+            if(bird.getBottom()>WINDOW_HEIGHT-GROUND_HEIGHT ||
+               bird.getTop()<0)
+                state=GameState::GameOver;
+
+            spawnTimer+=dt;
+            if(spawnTimer>=PIPE_INTERVAL)
+            { spawnTimer=0; pipes.emplace_back(WINDOW_WIDTH); }
+
+            for(auto& p:pipes)
+            {
+                p.update(dt);
+                if(p.checkCollision(bird)) state=GameState::GameOver;
+                if(p.passed(200)) score++;
+            }
+
+            pipes.erase(std::remove_if(pipes.begin(),pipes.end(),
+                [](const Pipe& p){return p.isOffscreen();}),
+                pipes.end());
+        }
+
+        scoreText.setString(std::to_string(score));
+
+        window.clear(sf::Color(120,200,255));
+
+        for(auto& p:pipes) p.draw(window);
+        bird.draw(window);
+        window.draw(ground);
+        window.draw(scoreText);
+
+        if(state!=GameState::Playing)
+        {
+            if(state==GameState::Start)
+                infoText.setString("CLAP TO START");
+            else
+                infoText.setString("GAME OVER\nCLAP TO RESTART");
+
+            auto r=infoText.getLocalBounds();
+            infoText.setOrigin({r.size.x/2,r.size.y/2});
+            infoText.setPosition({WINDOW_WIDTH/2.f,WINDOW_HEIGHT/2.f});
+            window.draw(infoText);
+        }
+
+        window.display();
+    }
+}
